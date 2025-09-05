@@ -183,6 +183,18 @@ export default {
     try {
       const url = new URL(request.url);
       const upgradeHeader = request.headers.get("Upgrade");
+            // Tambahkan header CORS untuk semua response
+      const corsHeaders = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+      };
+
+      if (request.method === "OPTIONS") {
+        return new Response(null, {
+          headers: corsHeaders
+        });
+      }
 
       // Gateway check
       if (apiKey && apiEmail && accountID && zoneID) {
@@ -393,10 +405,12 @@ export default {
       const targetReverseProxy = env.REVERSE_PROXY_TARGET || "example.com";
       return await reverseProxy(request, targetReverseProxy);
     } catch (err) {
+      // Pastikan error response juga punya CORS headers
       return new Response(`An error occurred: ${err.toString()}`, {
         status: 500,
         headers: {
           ...CORS_HEADER_OPTIONS,
+          "Content-Type": "text/plain"
         },
       });
     }
@@ -1610,7 +1624,8 @@ class Document {
       proxyGroupElement += `      <div id="container-region-check-${i}">`;
       proxyGroupElement += `        <input id="config-sample-${i}" class="hidden" type="text" value="${proxyData.list[0]}">`;
       proxyGroupElement += `      </div>`;
-      proxyG_proxy_info += `    </div>`;
+      // Perbaikan: ganti proxyG_proxy_info dengan proxyGroupElement
+      proxyGroupElement += `    </div>`;
       proxyGroupElement += `  </div>`;
       proxyGroupElement += `  <div class="flex flex-col gap-2 mt-4 text-sm">`;
       for (let x = 0; x < proxyData.list.length; x++) {
