@@ -34,6 +34,16 @@ const CORS_HEADER_OPTIONS = {
   "Access-Control-Max-Age": "86400",
 };
 
+// Tambahkan error handling yang komprehensif
+async function handleWithErrorHandling(fn, errorMessage) {
+  try {
+    return await fn();
+  } catch (error) {
+    console.error(`${errorMessage}: ${error.message}`);
+    throw error;
+  }
+}
+
 // Pindahkan kelas Document ke atas sebelum digunakan
 class Document {
   proxies = [];
@@ -364,60 +374,63 @@ async function getKVProxyList(kvProxyUrl = KV_PROXY_URL) {
   }
 }
 
+// Optimasi memori dengan membatasi cachedProxyList
 async function getProxyList(proxyBankUrl = PROXY_BANK_URL) {
-  /**
-   * Format:
-   *
-   * <IP>,<Port>,<Country ID>,<ORG>
-   * Contoh:
-   * 1.1.1.1,443,SG,Cloudflare Inc.
-   */
-  if (!proxyBankUrl) {
-    throw new Error("No Proxy Bank URL Provided!");
+  try {
+    if (!proxyBankUrl) {
+      throw new Error("No Proxy Bank URL Provided!");
+    }
+
+    const proxyBank = await fetch(proxyBankUrl);
+    if (proxyBank.status == 200) {
+      const text = (await proxyBank.text()) || "";
+      const proxyString = text.split("\n").filter(Boolean);
+      
+      // Batasi jumlah proxy yang di-cache
+      cachedProxyList = proxyString
+        .slice(0, 1000) // Batasi hingga 1000 proxy
+        .map((entry) => {
+          const [proxyIP, proxyPort, country, org] = entry.split(",");
+          return {
+            proxyIP: proxyIP || "Unknown",
+            proxyPort: proxyPort || "Unknown",
+            country: country || "Unknown",
+            org: org || "Unknown Org",
+          };
+        })
+        .filter(Boolean);
+    }
+
+    return cachedProxyList;
+  } catch (error) {
+    console.error('Error getting proxy list:', error);
+    return [];
   }
-
-  const proxyBank = await fetch(proxyBankUrl);
-  if (proxyBank.status == 200) {
-    const text = (await proxyBank.text()) || "";
-
-    const proxyString = text.split("\n").filter(Boolean);
-    cachedProxyList = proxyString
-      .map((entry) => {
-        const [proxyIP, proxyPort, country, org] = entry.split(",");
-        return {
-          proxyIP: proxyIP || "Unknown",
-          proxyPort: proxyPort || "Unknown",
-          country: country || "Unknown",
-          org: org || "Unknown Org",
-        };
-      })
-      .filter(Boolean);
-  }
-
-  return cachedProxyList;
 }
 
+// Perbaikan untuk reverseProxy
 async function reverseProxy(request, target, targetPath) {
-  const targetUrl = new URL(request.url);
-  const targetChunk = target.split(":");
+  return handleWithErrorHandling(async () => {
+    const targetUrl = new URL(request.url);
+    const targetChunk = target.split(":");
 
-  targetUrl.hostname = targetChunk[0];
-  targetUrl.port = targetChunk[1]?.toString() || "443";
-  targetUrl.pathname = targetPath || targetUrl.pathname;
+    targetUrl.hostname = targetChunk[0];
+    targetUrl.port = targetChunk[1]?.toString() || "443";
+    targetUrl.pathname = targetPath || targetUrl.pathname;
 
-  const modifiedRequest = new Request(targetUrl, request);
+    const modifiedRequest = new Request(targetUrl, request);
+    modifiedRequest.headers.set("X-Forwarded-Host", request.headers.get("Host"));
 
-  modifiedRequest.headers.set("X-Forwarded-Host", request.headers.get("Host"));
+    const response = await fetch(modifiedRequest);
+    const newResponse = new Response(response.body, response);
+    
+    for (const [key, value] of Object.entries(CORS_HEADER_OPTIONS)) {
+      newResponse.headers.set(key, value);
+    }
+    newResponse.headers.set("X-Proxied-By", "Cloudflare Worker");
 
-  const response = await fetch(modifiedRequest);
-
-  const newResponse = new Response(response.body, response);
-  for (const [key, value] of Object.entries(CORS_HEADER_OPTIONS)) {
-    newResponse.headers.set(key, value);
-  }
-  newResponse.headers.set("X-Proxied-By", "Cloudflare Worker");
-
-  return newResponse;
+    return newResponse;
+  }, "Reverse proxy error");
 }
 
 function getAllConfig(request, hostName, proxyList, page = 0) {
@@ -502,6 +515,9 @@ export default {
       const apiEmail = env.API_EMAIL || "bexov90876@eligou.com";
       const accountID = env.ACCOUNT_ID || "8c7b08359803ebffe43e4b05570f061c";
       const zoneID = env.ZONE_ID || "2375817504633afc85b69fa47b7f1560";
+
+      // Tambahkan passThroughOnException untuk fallback ke origin jika ada error
+      ctx.passThroughOnException();
       
       // Gateway check
       if (apiKey && apiEmail && accountID && zoneID) {
@@ -780,8 +796,8 @@ export default {
       });
       
     } catch (err) {
-      console.error('Error details:', err.message, err.stack);
-      return new Response(`An error occurred: ${err.toString()}`, {
+      console.error('Fetch handler error:', err.message, err.stack);
+      return new Response(`An error occurred: ${err.message}`, {
         status: 500,
         headers: {
           ...CORS_HEADER_OPTIONS,
@@ -792,88 +808,100 @@ export default {
 };
 
 async function websocketHandler(request) {
-  const webSocketPair = new WebSocketPair();
-  const [client, webSocket] = Object.values(webSocketPair);
+  try {
+    const webSocketPair = new WebSocketPair();
+    const [client, webSocket] = Object.values(webSocketPair);
 
-  webSocket.accept();
+    webSocket.accept();
 
-  let addressLog = "";
-  let portLog = "";
-  const log = (info, event) => {
-    console.log(`[${addressLog}:${portLog}] ${info}`, event || "");
-  };
-  const earlyDataHeader = request.headers.get("sec-websocket-protocol") || "";
+    // Tambahkan error handler untuk WebSocket
+    webSocket.addEventListener('error', (error) => {
+      console.error('WebSocket error:', error);
+    });
 
-  const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
+    let addressLog = "";
+    let portLog = "";
+    const log = (info, event) => {
+      console.log(`[${addressLog}:${portLog}] ${info}`, event || "");
+    };
 
-  let remoteSocketWrapper = {
-    value: null,
-  };
-  let isDNS = false;
+    const earlyDataHeader = request.headers.get("sec-websocket-protocol") || "";
+    const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
 
-  readableWebSocketStream
-    .pipeTo(
+    let remoteSocketWrapper = {
+      value: null,
+    };
+    let isDNS = false;
+
+    // Gunakan pipeline yang lebih aman dengan error handling
+    const pipeline = readableWebSocketStream.pipeTo(
       new WritableStream({
         async write(chunk, controller) {
-          if (isDNS) {
-            return handleUDPOutbound(DNS_SERVER_ADDRESS, DNS_SERVER_PORT, chunk, webSocket, null, log);
-          }
-          if (remoteSocketWrapper.value) {
-            const writer = remoteSocketWrapper.value.writable.getWriter();
-            await writer.write(chunk);
-            writer.releaseLock();
-            return;
-          }
-
-          const protocol = await protocolSniffer(chunk);
-          let protocolHeader;
-
-          if (protocol === reverse("najorT")) {
-            protocolHeader = parseNajortHeader(chunk);
-          } else if (protocol === reverse("SSELV")) {
-            protocolHeader = parseSselvHeader(chunk);
-          } else if (protocol === reverse("skcoswodahS")) {
-            protocolHeader = parseSsHeader(chunk);
-          } else {
-            throw new Error("Unknown Protocol!");
-          }
-
-          addressLog = protocolHeader.addressRemote;
-          portLog = `${protocolHeader.portRemote} -> ${protocolHeader.isUDP ? "UDP" : "TCP"}`;
-
-          if (protocolHeader.hasError) {
-            throw new Error(protocolHeader.message);
-          }
-
-          if (protocolHeader.isUDP) {
-            if (protocolHeader.portRemote === 53) {
-              isDNS = true;
-            } else {
-              // return handleUDPOutbound(protocolHeader.addressRemote, protocolHeader.portRemote, chunk, webSocket, protocolHeader.version, log);
-              throw new Error("UDP only support for DNS port 53");
+          try {
+            if (isDNS) {
+              await handleUDPOutbound(DNS_SERVER_ADDRESS, DNS_SERVER_PORT, chunk, webSocket, null, log);
+              return;
             }
-          }
+            
+            if (remoteSocketWrapper.value) {
+              const writer = remoteSocketWrapper.value.writable.getWriter();
+              await writer.write(chunk);
+              writer.releaseLock();
+              return;
+            }
 
-          if (isDNS) {
-            return handleUDPOutbound(
-              DNS_SERVER_ADDRESS,
-              DNS_SERVER_PORT,
-              chunk,
-              webSocket,
-              protocolHeader.version,
-              log
-            );
-          }
+            const protocol = await protocolSniffer(chunk);
+            let protocolHeader;
 
-          handleTCPOutBound(
-            remoteSocketWrapper,
-            protocolHeader.addressRemote,
-            protocolHeader.portRemote,
-            protocolHeader.rawClientData,
-            webSocket,
-            protocolHeader.version,
-            log
-          );
+            if (protocol === reverse("najorT")) {
+              protocolHeader = parseNajortHeader(chunk);
+            } else if (protocol === reverse("SSELV")) {
+              protocolHeader = parseSselvHeader(chunk);
+            } else if (protocol === reverse("skcoswodahS")) {
+              protocolHeader = parseSsHeader(chunk);
+            } else {
+              throw new Error("Unknown Protocol!");
+            }
+
+            addressLog = protocolHeader.addressRemote;
+            portLog = `${protocolHeader.portRemote} -> ${protocolHeader.isUDP ? "UDP" : "TCP"}`;
+
+            if (protocolHeader.hasError) {
+              throw new Error(protocolHeader.message);
+            }
+
+            if (protocolHeader.isUDP) {
+              if (protocolHeader.portRemote === 53) {
+                isDNS = true;
+              } else {
+                throw new Error("UDP only support for DNS port 53");
+              }
+            }
+
+            if (isDNS) {
+              await handleUDPOutbound(
+                DNS_SERVER_ADDRESS,
+                DNS_SERVER_PORT,
+                chunk,
+                webSocket,
+                protocolHeader.version,
+                log
+              );
+            } else {
+              await handleTCPOutBound(
+                remoteSocketWrapper,
+                protocolHeader.addressRemote,
+                protocolHeader.portRemote,
+                protocolHeader.rawClientData,
+                webSocket,
+                protocolHeader.version,
+                log
+              );
+            }
+          } catch (error) {
+            console.error('Error processing WebSocket data:', error);
+            controller.error(error);
+          }
         },
         close() {
           log(`readableWebSocketStream is close`);
@@ -882,15 +910,22 @@ async function websocketHandler(request) {
           log(`readableWebSocketStream is abort`, JSON.stringify(reason));
         },
       })
-    )
-    .catch((err) => {
-      log("readableWebSocketStream pipeTo error", err);
+    ).catch((err) => {
+      log("WebSocket pipeline error", err);
+      safeCloseWebSocket(webSocket);
     });
 
-  return new Response(null, {
-    status: 101,
-    webSocket: client,
-  });
+    // Pastikan pipeline selesai dengan benar
+    await pipeline;
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    });
+  } catch (error) {
+    console.error('WebSocket handler error:', error);
+    return new Response('WebSocket connection failed', { status: 500 });
+  }
 }
 
 async function protocolSniffer(buffer) {
@@ -1041,59 +1076,66 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
 }
 
 function parseSsHeader(ssBuffer) {
-  const view = new DataView(ssBuffer);
+  try {
+    const view = new DataView(ssBuffer);
 
-  const addressType = view.getUint8(0);
-  let addressLength = 0;
-  let addressValueIndex = 1;
-  let addressValue = "";
+    const addressType = view.getUint8(0);
+    let addressLength = 0;
+    let addressValueIndex = 1;
+    let addressValue = "";
 
-  switch (addressType) {
-    case 1:
-      addressLength = 4;
-      addressValue = new Uint8Array(ssBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
-      break;
-    case 3:
-      addressLength = new Uint8Array(ssBuffer.slice(addressValueIndex, addressValueIndex + 1))[0];
-      addressValueIndex += 1;
-      addressValue = new TextDecoder().decode(ssBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
-      break;
-    case 4:
-      addressLength = 16;
-      const dataView = new DataView(ssBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
-      const ipv6 = [];
-      for (let i = 0; i < 8; i++) {
-        ipv6.push(dataView.getUint16(i * 2).toString(16));
-      }
-      addressValue = ipv6.join(":");
-      break;
-    default:
+    switch (addressType) {
+      case 1:
+        addressLength = 4;
+        addressValue = new Uint8Array(ssBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
+        break;
+      case 3:
+        addressLength = new Uint8Array(ssBuffer.slice(addressValueIndex, addressValueIndex + 1))[0];
+        addressValueIndex += 1;
+        addressValue = new TextDecoder().decode(ssBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
+        break;
+      case 4:
+        addressLength = 16;
+        const dataView = new DataView(ssBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
+        const ipv6 = [];
+        for (let i = 0; i < 8; i++) {
+          ipv6.push(dataView.getUint16(i * 2).toString(16));
+        }
+        addressValue = ipv6.join(":");
+        break;
+      default:
+        return {
+          hasError: true,
+          message: `Invalid addressType for ${reverse("skcoswodahS")}: ${addressType}`,
+        };
+    }
+
+    if (!addressValue) {
       return {
         hasError: true,
-        message: `Invalid addressType for ${reverse("skcoswodahS")}: ${addressType}`,
+        message: `Destination address empty, address type is: ${addressType}`,
       };
-  }
+    }
 
-  if (!addressValue) {
+    const portIndex = addressValueIndex + addressLength;
+    const portBuffer = ssBuffer.slice(portIndex, portIndex + 2);
+    const portRemote = new DataView(portBuffer).getUint16(0);
     return {
-      hasError: true,
-      message: `Destination address empty, address type is: ${addressType}`,
-    };
-  }
-
-  const portIndex = addressValueIndex + addressLength;
-  const portBuffer = ssBuffer.slice(portIndex, portIndex + 2);
-  const portRemote = new DataView(portBuffer).getUint16(0);
-  return {
-    hasError: false,
-    addressRemote: addressValue,
-    addressType: addressType,
-    portRemote: portRemote,
-    rawDataIndex: portIndex + 2,
-    rawClientData: ssBuffer.slice(portIndex + 2),
-    version: null,
-    isUDP: portRemote == 53,
-  };
+      hasError: false,
+      addressRemote: addressValue,
+      addressType: addressType,
+      portRemote: portRemote,
+      rawDataIndex: portIndex + 2,
+      rawClientData: ssBuffer.slice(portIndex + 2),
+      version: null,
+      isUDP: portRemote == 53,
+    }; 
+  } catch (error) {
+        return {
+          hasError: true,
+          message: `SS header parsing error: ${error.message}`,
+      };
+    }
 }
 
 function parseSselvHeader(buffer) {
