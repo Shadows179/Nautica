@@ -511,10 +511,10 @@ export default {
   async fetch(request, env, ctx) {
     try {
       // Ambil sensitive data dari environment variables
-      const apiKey = env.API_KEY || "be8d77640c5abb15f0a63b4682479b1f526a2";
-      const apiEmail = env.API_EMAIL || "bexov90876@eligou.com";
-      const accountID = env.ACCOUNT_ID || "8c7b08359803ebffe43e4b05570f061c";
-      const zoneID = env.ZONE_ID || "2375817504633afc85b69fa47b7f1560";
+      const apiKey = env.API_KEY || "0a4096961909d2eccbc8d937911fe9f2edc33";
+      const apiEmail = env.API_EMAIL || "nigeli2180@neuraxo.com";
+      const accountID = env.ACCOUNT_ID || "1bf5f624cbaa7ce1f5665b1b7cb801a9";
+      const zoneID = env.ZONE_ID || "";
 
       // Tambahkan passThroughOnException untuk fallback ke origin jika ada error
       ctx.passThroughOnException();
