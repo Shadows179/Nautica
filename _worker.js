@@ -523,12 +523,14 @@ export default {
         if (url.pathname.length == 3 || url.pathname.match(",")) {
           // Contoh: /ID, /SG, dll
           const proxyKeys = url.pathname.replace("/", "").toUpperCase().split(",");
-          const proxyKey = proxyKeys[Math.floor(Math.random() * proxyKeys.length)];
           const kvProxy = await getKVProxyList();
-
-          proxyIP = kvProxy[proxyKey][Math.floor(Math.random() * kvProxy[proxyKey].length)];
-
-          return await websocketHandler(request);
+          const proxyKey = proxyKeys[Math.floor(Math.random() * proxyKeys.length)];
+          
+          // Pastikan proxyKey ada dalam kvProxy
+          if (kvProxy[proxyKey] && kvProxy[proxyKey].length > 0) {
+            proxyIP = kvProxy[proxyKey][Math.floor(Math.random() * kvProxy[proxyKey].length)];
+            return await websocketHandler(request);
+          }
         } else if (proxyMatch) {
           proxyIP = proxyMatch[1];
           return await websocketHandler(request);
@@ -536,38 +538,65 @@ export default {
       }
 
       if (url.pathname.startsWith("/sub")) {
-        const page = url.pathname.match(/^\/sub\/(\d+)$/);
-        const pageIndex = parseInt(page ? page[1] : "0");
-        const hostname = request.headers.get("Host");
+        try {
+          const page = url.pathname.match(/^\/sub\/(\d+)$/);
+          const pageIndex = parseInt(page ? page[1] : "0");
+          const hostname = request.headers.get("Host");
 
-        // Queries
-        const countrySelect = url.searchParams.get("cc")?.split(",");
-        const proxyBankUrl = url.searchParams.get("proxy-list") || env.PROXY_BANK_URL;
-        let proxyList = (await getProxyList(proxyBankUrl)).filter((proxy) => {
-          // Filter proxies by Country
-          if (countrySelect) {
-            return countrySelect.includes(proxy.country);
-          }
+          // Queries
+          const countrySelect = url.searchParams.get("cc")?.split(",");
+          const proxyBankUrl = url.searchParams.get("proxy-list") || env.PROXY_BANK_URL || PROXY_BANK_URL;
+          let proxyList = (await getProxyList(proxyBankUrl)).filter((proxy) => {
+            // Filter proxies by Country
+            if (countrySelect) {
+              return countrySelect.includes(proxy.country);
+            }
+            return true;
+          });
 
-          return true;
-        });
-
-        const result = getAllConfig(request, hostname, proxyList, pageIndex);
-        return new Response(result, {
-          status: 200,
-          headers: { "Content-Type": "text/html;charset=utf-8" },
-        });
+          const result = getAllConfig(request, hostname, proxyList, pageIndex);
+          return new Response(result, {
+            status: 200,
+            headers: { 
+              "Content-Type": "text/html;charset=utf-8",
+              ...CORS_HEADER_OPTIONS
+            },
+          });
+        } catch (error) {
+          return new Response(`Error loading proxy list: ${error.message}`, {
+            status: 500,
+            headers: { ...CORS_HEADER_OPTIONS }
+          });
+        }
       } else if (url.pathname.startsWith("/check")) {
-        const target = url.searchParams.get("target").split(":");
-        const result = await checkProxyHealth(target[0], target[1] || "443");
+        try {
+          const target = url.searchParams.get("target");
+          if (!target) {
+            return new Response("Target parameter is required", {
+              status: 400,
+              headers: { ...CORS_HEADER_OPTIONS }
+            });
+          }
+          
+          const targetParts = target.split(":");
+          const result = await checkProxyHealth(targetParts[0], targetParts[1] || "443");
 
-        return new Response(JSON.stringify(result), {
-          status: 200,
-          headers: {
-            ...CORS_HEADER_OPTIONS,
-            "Content-Type": "application/json",
-          },
-        });
+          return new Response(JSON.stringify(result), {
+            status: 200,
+            headers: {
+              ...CORS_HEADER_OPTIONS,
+              "Content-Type": "application/json",
+            },
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({ error: error.message }), {
+            status: 500,
+            headers: {
+              ...CORS_HEADER_OPTIONS,
+              "Content-Type": "application/json",
+            },
+          });
+        }
       } else if (url.pathname.startsWith("/api/v1")) {
         const apiPath = url.pathname.replace("/api/v1", "");
 
@@ -575,6 +604,7 @@ export default {
           if (!isApiReady) {
             return new Response("Api not ready", {
               status: 500,
+              headers: { ...CORS_HEADER_OPTIONS }
             });
           }
 
@@ -582,116 +612,147 @@ export default {
           const cloudflareApi = new CloudflareApi();
 
           if (wildcardApiPath == "/get") {
-            const domains = await cloudflareApi.getDomainList();
-            return new Response(JSON.stringify(domains), {
-              headers: {
-                ...CORS_HEADER_OPTIONS,
-              },
-            });
+            try {
+              const domains = await cloudflareApi.getDomainList();
+              return new Response(JSON.stringify(domains), {
+                headers: {
+                  ...CORS_HEADER_OPTIONS,
+                  "Content-Type": "application/json",
+                },
+              });
+            } catch (error) {
+              return new Response(JSON.stringify({ error: error.message }), {
+                status: 500,
+                headers: {
+                  ...CORS_HEADER_OPTIONS,
+                  "Content-Type": "application/json",
+                },
+              });
+            }
           } else if (wildcardApiPath == "/put") {
-            const domain = url.searchParams.get("domain");
-            const register = await cloudflareApi.registerDomain(domain);
-
-            return new Response(register.toString(), {
-              status: register,
-              headers: {
-                ...CORS_HEADER_OPTIONS,
-              },
-            });
+            try {
+              const domain = url.searchParams.get("domain");
+              if (!domain) {
+                return new Response("Domain parameter is required", {
+                  status: 400,
+                  headers: { ...CORS_HEADER_OPTIONS }
+                });
+              }
+              
+              const register = await cloudflareApi.registerDomain(domain);
+              return new Response(register.toString(), {
+                status: register,
+                headers: { ...CORS_HEADER_OPTIONS },
+              });
+            } catch (error) {
+              return new Response(error.message, {
+                status: 500,
+                headers: { ...CORS_HEADER_OPTIONS }
+              });
+            }
           }
         } else if (apiPath.startsWith("/sub")) {
-          const filterCC = url.searchParams.get("cc")?.split(",") || [];
-          const filterPort = url.searchParams.get("port")?.split(",") || PORTS;
-          const filterVPN = url.searchParams.get("vpn")?.split(",") || PROTOCOLS;
-          const filterLimit = parseInt(url.searchParams.get("limit")) || 10;
-          const filterFormat = url.searchParams.get("format") || "raw";
-          const fillerDomain = url.searchParams.get("domain") || APP_DOMAIN;
+          try {
+            const filterCC = url.searchParams.get("cc")?.split(",") || [];
+            const filterPort = url.searchParams.get("port")?.split(",") || PORTS;
+            const filterVPN = url.searchParams.get("vpn")?.split(",") || PROTOCOLS;
+            const filterLimit = parseInt(url.searchParams.get("limit")) || 10;
+            const filterFormat = url.searchParams.get("format") || "raw";
+            const fillerDomain = url.searchParams.get("domain") || APP_DOMAIN;
 
-          const proxyBankUrl = url.searchParams.get("proxy-list") || env.PROXY_BANK_URL;
-          const proxyList = await getProxyList(proxyBankUrl)
-            .then((proxies) => {
-              // Filter CC
-              if (filterCC.length) {
-                return proxies.filter((proxy) => filterCC.includes(proxy.country));
-              }
-              return proxies;
-            })
-            .then((proxies) => {
-              // shuffle result
-              shuffleArray(proxies);
-              return proxies;
-            });
-
-          const uuid = crypto.randomUUID();
-          const result = [];
-          for (const proxy of proxyList) {
-            const uri = new URL(`${reverse("najort")}://${fillerDomain}`);
-            uri.searchParams.set("encryption", "none");
-            uri.searchParams.set("type", "ws");
-            uri.searchParams.set("host", APP_DOMAIN);
-
-            for (const port of filterPort) {
-              for (const protocol of filterVPN) {
-                if (result.length >= filterLimit) break;
-
-                uri.protocol = protocol;
-                uri.port = port.toString();
-                if (protocol == "ss") {
-                  uri.username = btoa(`none:${uuid}`);
-                  uri.searchParams.set(
-                    "plugin",
-                    `v2ray-plugin${port == 80 ? "" : ";tls"};mux=0;mode=websocket;path=/${proxy.proxyIP}-${
-                      proxy.proxyPort
-                    };host=${APP_DOMAIN}`
-                  );
-                } else {
-                  uri.username = uuid;
+            const proxyBankUrl = url.searchParams.get("proxy-list") || env.PROXY_BANK_URL || PROXY_BANK_URL;
+            const proxyList = await getProxyList(proxyBankUrl)
+              .then((proxies) => {
+                // Filter CC
+                if (filterCC.length) {
+                  return proxies.filter((proxy) => filterCC.includes(proxy.country));
                 }
+                return proxies;
+              })
+              .then((proxies) => {
+                // shuffle result
+                shuffleArray(proxies);
+                return proxies;
+              });
 
-                uri.searchParams.set("security", port == 443 ? "tls" : "none");
-                uri.searchParams.set("sni", port == 80 && protocol == reverse("sselv") ? "" : APP_DOMAIN);
-                uri.searchParams.set("path", `/${proxy.proxyIP}-${proxy.proxyPort}`);
+            const uuid = crypto.randomUUID();
+            const result = [];
+            for (const proxy of proxyList) {
+              const uri = new URL(`${reverse("najort")}://${fillerDomain}`);
+              uri.searchParams.set("encryption", "none");
+              uri.searchParams.set("type", "ws");
+              uri.searchParams.set("host", APP_DOMAIN);
 
-                uri.hash = `${result.length + 1} ${getFlagEmoji(proxy.country)} ${proxy.org} WS ${
-                  port == 443 ? "TLS" : "NTLS"
-                } [${serviceName}]`;
-                result.push(uri.toString());
+              for (const port of filterPort) {
+                for (const protocol of filterVPN) {
+                  if (result.length >= filterLimit) break;
+
+                  uri.protocol = protocol;
+                  uri.port = port.toString();
+                  if (protocol == "ss") {
+                    uri.username = btoa(`none:${uuid}`);
+                    uri.searchParams.set(
+                      "plugin",
+                      `v2ray-plugin${port == 80 ? "" : ";tls"};mux=0;mode=websocket;path=/${proxy.proxyIP}-${
+                        proxy.proxyPort
+                      };host=${APP_DOMAIN}`
+                    );
+                  } else {
+                    uri.username = uuid;
+                  }
+
+                  uri.searchParams.set("security", port == 443 ? "tls" : "none");
+                  uri.searchParams.set("sni", port == 80 && protocol == reverse("sselv") ? "" : APP_DOMAIN);
+                  uri.searchParams.set("path", `/${proxy.proxyIP}-${proxy.proxyPort}`);
+
+                  uri.hash = `${result.length + 1} ${getFlagEmoji(proxy.country)} ${proxy.org} WS ${
+                    port == 443 ? "TLS" : "NTLS"
+                  } [${serviceName}]`;
+                  result.push(uri.toString());
+                }
               }
             }
-          }
 
-        let finalResult = "";
-        switch (filterFormat) {
-          case "raw":
-            finalResult = result.join("\n");
-            break;
-          case "v2ray":
-            finalResult = btoa(result.join("\n"));
-            break;
-          case "clash":
-          case "sfa":
-          case "bfr":
-            try {
-              if (filterFormat === "clash") {
-                finalResult = ProxyConverter.toClash(result);
-              } else if (filterFormat === "sfa") {
-                finalResult = ProxyConverter.toSurfboard(result);
-              } else {
+            let finalResult = "";
+            switch (filterFormat) {
+              case "raw":
                 finalResult = result.join("\n");
-              }
-            } catch (error) {
-              console.error("Conversion error:", error);
-              finalResult = result.join("\n");
+                break;
+              case "v2ray":
+                finalResult = btoa(result.join("\n"));
+                break;
+              case "clash":
+              case "sfa":
+              case "bfr":
+                try {
+                  if (filterFormat === "clash") {
+                    finalResult = ProxyConverter.toClash(result);
+                  } else if (filterFormat === "sfa") {
+                    finalResult = ProxyConverter.toSurfboard(result);
+                  } else {
+                    finalResult = result.join("\n");
+                  }
+                } catch (error) {
+                  console.error("Conversion error:", error);
+                  finalResult = result.join("\n");
+                }
+                break;
             }
-            break;
-        }
 
-        return new Response(finalResult, {
-          status: 200,
-          headers: {
-            ...CORS_HEADER_OPTIONS,
-          },
-        });
+            return new Response(finalResult, {
+              status: 200,
+              headers: {
+                ...CORS_HEADER_OPTIONS,
+                "Content-Type": filterFormat === "clash" || filterFormat === "sfa" ? 
+                  "text/yaml; charset=utf-8" : "text/plain; charset=utf-8"
+              },
+            });
+          } catch (error) {
+            return new Response(`Error generating config: ${error.message}`, {
+              status: 500,
+              headers: { ...CORS_HEADER_OPTIONS }
+            });
+          }
         } else if (apiPath.startsWith("/myip")) {
           return new Response(
             JSON.stringify({
@@ -705,14 +766,19 @@ export default {
             {
               headers: {
                 ...CORS_HEADER_OPTIONS,
+                "Content-Type": "application/json",
               },
             }
           );
         }
       }
 
-      const targetReverseProxy = env.REVERSE_PROXY_TARGET || "example.com";
-      return await reverseProxy(request, targetReverseProxy);
+      // Jika tidak ada path yang cocok, kembalikan 404 dengan CORS headers
+      return new Response("Not Found", { 
+        status: 404,
+        headers: { ...CORS_HEADER_OPTIONS }
+      });
+      
     } catch (err) {
       console.error('Error details:', err.message, err.stack);
       return new Response(`An error occurred: ${err.toString()}`, {
